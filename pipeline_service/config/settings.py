@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     output_image_size: tuple[int, int] = Field(default=(518, 518), env="OUTPUT_IMAGE_SIZE") # (height, width)
     padding_percentage: float = Field(default=0.2, env="PADDING_PERCENTAGE")
     limit_padding: bool = Field(default=True, env="LIMIT_PADDING")
+    # Mask post-processing (helps avoid "double objects" from clutter/shadows)
+    keep_largest_component: bool = Field(default=True, env="KEEP_LARGEST_COMPONENT")
+    mask_gamma: float = Field(default=1.25, env="MASK_GAMMA")
 
     # Object-only preprocessing
     # Neutral background color used after segmentation (improves stability on cluttered photos)

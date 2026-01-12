@@ -146,6 +146,71 @@ class BackgroundRemovalService:
             preds = self.model(input_tensor)[-1].sigmoid()  # (1,1,H,W)
             mask = preds[0, 0].float().clamp(0, 1)          # (H,W)
 
+        # Suppress low-confidence shadowy regions (keeps strong foreground)
+        try:
+            gamma = float(getattr(self.settings, "mask_gamma", 1.0))
+        except Exception:
+            gamma = 1.0
+        if gamma != 1.0:
+            mask = mask.pow(gamma)
+
+        # If the scene contains multiple objects, keep only the largest connected component.
+        # This helps prevent "double bowls/heads" artifacts.
+        try:
+            keep_largest = bool(getattr(self.settings, "keep_largest_component", True))
+        except Exception:
+            keep_largest = True
+        if keep_largest:
+            thresh_cc = 0.25
+            bin_mask = (mask > thresh_cc).detach().to("cpu").numpy().astype(np.uint8)
+            if bin_mask.any():
+                h0, w0 = bin_mask.shape
+                visited = np.zeros((h0, w0), dtype=np.uint8)
+                best_count = 0
+                best_pixels: list[tuple[int, int]] = []
+
+                # 4-neighborhood flood fill (fast enough for 1024x1024 in practice)
+                for y in range(h0):
+                    row = bin_mask[y]
+                    vrow = visited[y]
+                    for x in range(w0):
+                        if row[x] == 0 or vrow[x] == 1:
+                            continue
+                        stack = [(y, x)]
+                        visited[y, x] = 1
+                        pixels: list[tuple[int, int]] = []
+                        while stack:
+                            cy, cx = stack.pop()
+                            pixels.append((cy, cx))
+                            # neighbors
+                            ny = cy - 1
+                            if ny >= 0 and bin_mask[ny, cx] and not visited[ny, cx]:
+                                visited[ny, cx] = 1
+                                stack.append((ny, cx))
+                            ny = cy + 1
+                            if ny < h0 and bin_mask[ny, cx] and not visited[ny, cx]:
+                                visited[ny, cx] = 1
+                                stack.append((ny, cx))
+                            nx = cx - 1
+                            if nx >= 0 and bin_mask[cy, nx] and not visited[cy, nx]:
+                                visited[cy, nx] = 1
+                                stack.append((cy, nx))
+                            nx = cx + 1
+                            if nx < w0 and bin_mask[cy, nx] and not visited[cy, nx]:
+                                visited[cy, nx] = 1
+                                stack.append((cy, nx))
+
+                        if len(pixels) > best_count:
+                            best_count = len(pixels)
+                            best_pixels = pixels
+
+                if best_pixels:
+                    keep = np.zeros((h0, w0), dtype=np.float32)
+                    ys, xs = zip(*best_pixels)
+                    keep[np.array(ys), np.array(xs)] = 1.0
+                    keep_t = torch.from_numpy(keep).to(mask.device)
+                    mask = mask * keep_t
+
         # BBox from a modest threshold (keeps thin regions better than 0.8)
         thresh = 0.2
         ys_xs = torch.argwhere(mask > thresh)  # (N,2) -> (y,x)
