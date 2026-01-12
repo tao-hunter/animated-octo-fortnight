@@ -6,6 +6,7 @@ import time
 from typing import Literal, Optional
 
 from PIL import Image
+import numpy as np
 import torch
 import gc
 
@@ -29,6 +30,7 @@ from modules.utils import (
     to_png_base64_any,
     composite_rgba_on_solid_background,
     make_tone_variant,
+    make_detail_variant,
     save_files,
 )
 
@@ -84,40 +86,76 @@ class GenerationPipeline:
 
         # Fast path: object-only segmentation + neutral background + multi-crop variants
         if self.settings.use_multicrop_views and not self.settings.use_qwen_views:
-            paddings = self.settings.multicrop_padding_factors
-            rgba_crops = [
-                self.rmbg.remove_background_rgba(image, padding_factor=paddings[0]),
-                self.rmbg.remove_background_rgba(image, padding_factor=paddings[1]),
-                self.rmbg.remove_background_rgba(image, padding_factor=paddings[2]),
-            ]
-            rgb_crops: list[Image.Image] = [
+            base_paddings = self.settings.multicrop_padding_factors
+
+            # 1) Start with the medium crop to estimate coverage and optionally auto-tighten/loosen.
+            medium_rgba = self.rmbg.remove_background_rgba(image, padding_factor=base_paddings[1])
+
+            def _alpha_coverage(rgba_img: Image.Image) -> float:
+                arr = np.array(rgba_img.convert("RGBA"))
+                alpha = arr[:, :, 3].astype(np.float32) / 255.0
+                return float(np.mean(alpha > 0.12))
+
+            paddings = base_paddings
+            if self.settings.auto_tighten_crops:
+                cov = _alpha_coverage(medium_rgba)
+                target = float(self.settings.target_alpha_coverage)
+                tol = float(self.settings.alpha_coverage_tolerance)
+
+                scale = 1.0
+                if cov < max(0.05, target - tol):
+                    # object too small => tighten (smaller crop)
+                    scale = 0.92
+                elif cov > min(0.95, target + tol):
+                    # object too large / risk of clipping => loosen (bigger crop)
+                    scale = 1.10
+
+                if abs(scale - 1.0) > 0.02:
+                    paddings = tuple(float(p) * scale for p in base_paddings)  # type: ignore[assignment]
+                    # Recompute medium to match new scale
+                    medium_rgba = self.rmbg.remove_background_rgba(image, padding_factor=paddings[1])
+
+            # 2) Tight and loose crops
+            tight_rgba = self.rmbg.remove_background_rgba(image, padding_factor=paddings[0])
+            loose_rgba = self.rmbg.remove_background_rgba(image, padding_factor=paddings[2])
+
+            rgba_crops = [tight_rgba, medium_rgba, loose_rgba]
+            rgb_base = [
                 composite_rgba_on_solid_background(rgba, self.settings.object_bg_color)
                 for rgba in rgba_crops
             ]
 
-            # Optional: add one mild tone variant (usually helps glossy objects + cluttered lighting)
-            if self.settings.use_tone_variant and rgb_crops:
-                mid = rgb_crops[min(1, len(rgb_crops) - 1)]
-                rgb_crops.append(
+            # 3) Add smart variants (ordered by usefulness); then cap total count.
+            mid_rgb = rgb_base[1]
+            variants: list[Image.Image] = []
+
+            if self.settings.use_detail_variant:
+                variants.append(
+                    make_detail_variant(
+                        mid_rgb,
+                        radius=self.settings.detail_radius,
+                        percent=self.settings.detail_percent,
+                        threshold=self.settings.detail_threshold,
+                    )
+                )
+
+            if self.settings.use_tone_variant:
+                variants.append(
                     make_tone_variant(
-                        mid,
+                        mid_rgb,
                         contrast=self.settings.tone_contrast,
                         saturation=self.settings.tone_saturation,
                         brightness=self.settings.tone_brightness,
                     )
                 )
 
-            # Optional: second neutral background (encourage invariance)
             if self.settings.object_bg_color_alt is not None:
-                rgb_crops.append(
-                    composite_rgba_on_solid_background(
-                        rgba_crops[min(1, len(rgba_crops) - 1)],
-                        self.settings.object_bg_color_alt,
-                    )
+                variants.append(
+                    composite_rgba_on_solid_background(medium_rgba, self.settings.object_bg_color_alt)
                 )
 
             # Keep count small for latency; Trellis doesn’t need lots of images here.
-            return rgb_crops[:5]
+            return (rgb_base + variants)[:5]
 
         # Optional slow path: Qwen-generated views (may drift; use only if you must)
         if self.settings.use_qwen_views:

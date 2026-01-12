@@ -1,4 +1,4 @@
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageEnhance, ImageFilter
 
 import io
 import base64
@@ -67,6 +67,19 @@ def make_tone_variant(
     if saturation != 1.0:
         img = ImageEnhance.Color(img).enhance(saturation)
     return img
+
+def make_detail_variant(
+    image: Image.Image,
+    *,
+    radius: int = 2,
+    percent: int = 120,
+    threshold: int = 3,
+) -> Image.Image:
+    """
+    Mild unsharp mask to emphasize fine details (identity-preserving if kept small).
+    """
+    img = image.convert("RGB")
+    return img.filter(ImageFilter.UnsharpMask(radius=radius, percent=percent, threshold=threshold))
 
 def secure_randint(low: int, high: int) -> int:
     """ Return a random integer in [low, high] using os.urandom. """

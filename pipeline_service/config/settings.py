@@ -65,6 +65,17 @@ class Settings(BaseSettings):
     tone_contrast: float = Field(default=0.92, env="TONE_CONTRAST")
     tone_saturation: float = Field(default=0.96, env="TONE_SATURATION")
     tone_brightness: float = Field(default=1.0, env="TONE_BRIGHTNESS")
+
+    # Optional detail-boost variant (helps fine textures like sprinkles, grain, engravings)
+    use_detail_variant: bool = Field(default=True, env="USE_DETAIL_VARIANT")
+    detail_radius: int = Field(default=2, env="DETAIL_RADIUS")
+    detail_percent: int = Field(default=120, env="DETAIL_PERCENT")
+    detail_threshold: int = Field(default=3, env="DETAIL_THRESHOLD")
+
+    # Auto-tighten/loosen crop based on alpha coverage (keeps object scale stable)
+    auto_tighten_crops: bool = Field(default=True, env="AUTO_TIGHTEN_CROPS")
+    target_alpha_coverage: float = Field(default=0.45, env="TARGET_ALPHA_COVERAGE")
+    alpha_coverage_tolerance: float = Field(default=0.18, env="ALPHA_COVERAGE_TOLERANCE")
     # Optional (slow / may introduce identity drift). Keep off for 30s budget.
     use_qwen_views: bool = Field(default=False, env="USE_QWEN_VIEWS")
     
