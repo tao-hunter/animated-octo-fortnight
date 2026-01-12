@@ -55,9 +55,16 @@ class Settings(BaseSettings):
     # Object-only preprocessing
     # Neutral background color used after segmentation (improves stability on cluttered photos)
     object_bg_color: tuple[int, int, int] = Field(default=(128, 128, 128), env="OBJECT_BG_COLOR")
+    # Optional second neutral background to encourage background-invariance
+    object_bg_color_alt: Optional[tuple[int, int, int]] = Field(default=(112, 120, 132), env="OBJECT_BG_COLOR_ALT")
     # Faster, identity-preserving "multi-view": multiple crops of the same segmented object
     use_multicrop_views: bool = Field(default=True, env="USE_MULTICROP_VIEWS")
     multicrop_padding_factors: tuple[float, float, float] = Field(default=(1.05, 1.20, 1.35), env="MULTICROP_PADDING_FACTORS")
+    # Optional mild tone variant for robustness to glare/lighting; keeps identity.
+    use_tone_variant: bool = Field(default=True, env="USE_TONE_VARIANT")
+    tone_contrast: float = Field(default=0.92, env="TONE_CONTRAST")
+    tone_saturation: float = Field(default=0.96, env="TONE_SATURATION")
+    tone_brightness: float = Field(default=1.0, env="TONE_BRIGHTNESS")
     # Optional (slow / may introduce identity drift). Keep off for 30s budget.
     use_qwen_views: bool = Field(default=False, env="USE_QWEN_VIEWS")
     

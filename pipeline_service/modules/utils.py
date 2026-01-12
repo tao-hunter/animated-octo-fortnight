@@ -1,4 +1,4 @@
-from PIL import Image
+from PIL import Image, ImageEnhance
 
 import io
 import base64
@@ -47,6 +47,26 @@ def to_png_base64_any(image_or_images: Image.Image | list[Image.Image]) -> str:
     if isinstance(image_or_images, list):
         return to_png_base64(images_to_strip(image_or_images))
     return to_png_base64(image_or_images)
+
+def make_tone_variant(
+    image: Image.Image,
+    *,
+    contrast: float = 0.92,
+    saturation: float = 0.96,
+    brightness: float = 1.0,
+) -> Image.Image:
+    """
+    Create a mild tone variant to reduce sensitivity to glare/lighting.
+    Intended to be identity-preserving.
+    """
+    img = image.convert("RGB")
+    if brightness != 1.0:
+        img = ImageEnhance.Brightness(img).enhance(brightness)
+    if contrast != 1.0:
+        img = ImageEnhance.Contrast(img).enhance(contrast)
+    if saturation != 1.0:
+        img = ImageEnhance.Color(img).enhance(saturation)
+    return img
 
 def secure_randint(low: int, high: int) -> int:
     """ Return a random integer in [low, high] using os.urandom. """

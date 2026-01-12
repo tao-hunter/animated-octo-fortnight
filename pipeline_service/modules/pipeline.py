@@ -28,6 +28,7 @@ from modules.utils import (
     to_png_base64,
     to_png_base64_any,
     composite_rgba_on_solid_background,
+    make_tone_variant,
     save_files,
 )
 
@@ -89,11 +90,34 @@ class GenerationPipeline:
                 self.rmbg.remove_background_rgba(image, padding_factor=paddings[1]),
                 self.rmbg.remove_background_rgba(image, padding_factor=paddings[2]),
             ]
-            rgb_crops = [
+            rgb_crops: list[Image.Image] = [
                 composite_rgba_on_solid_background(rgba, self.settings.object_bg_color)
                 for rgba in rgba_crops
             ]
-            return rgb_crops
+
+            # Optional: add one mild tone variant (usually helps glossy objects + cluttered lighting)
+            if self.settings.use_tone_variant and rgb_crops:
+                mid = rgb_crops[min(1, len(rgb_crops) - 1)]
+                rgb_crops.append(
+                    make_tone_variant(
+                        mid,
+                        contrast=self.settings.tone_contrast,
+                        saturation=self.settings.tone_saturation,
+                        brightness=self.settings.tone_brightness,
+                    )
+                )
+
+            # Optional: second neutral background (encourage invariance)
+            if self.settings.object_bg_color_alt is not None:
+                rgb_crops.append(
+                    composite_rgba_on_solid_background(
+                        rgba_crops[min(1, len(rgba_crops) - 1)],
+                        self.settings.object_bg_color_alt,
+                    )
+                )
+
+            # Keep count small for latency; Trellis doesn’t need lots of images here.
+            return rgb_crops[:5]
 
         # Optional slow path: Qwen-generated views (may drift; use only if you must)
         if self.settings.use_qwen_views:
