@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from transformers import AutoModelForImageSegmentation
 from torchvision import transforms
@@ -76,31 +77,36 @@ class BackgroundRemovalService:
     def remove_background(self, image: Image.Image) -> Image.Image:
         """
         Remove the background from the image.
+        Returns an RGB image (foreground premultiplied over black).
+
+        For object-only pipelines, prefer `remove_background_rgba()` and then
+        composite onto a neutral background.
         """
         try:
             t1 = time.time()
-            # Check if the image has alpha channel
-            has_alpha = False
-            
+            # If already has meaningful alpha, just premultiply it.
             if image.mode == "RGBA":
-                # Get alpha channel
-                alpha = np.array(image)[:, :, 3]
-                if not np.all(alpha==255):
-                    has_alpha=True
-            
-            if has_alpha:
-                # If the image has alpha channel, return the image
-                output = image
-                
-            else:
-                # PIL.Image (H, W, C) C=3
-                rgb_image = image.convert('RGB')
-                
-                # Tensor (H, W, C) -> (C, H',W')
-                rgb_tensor = self.transforms(rgb_image).to(self.device)
-                output = self._remove_background(rgb_tensor)
+                rgba = np.array(image).astype(np.float32) / 255.0
+                alpha = rgba[:, :, 3:4]
+                if np.any(alpha < 0.999):
+                    rgb = rgba[:, :, :3] * alpha
+                    image_without_background = Image.fromarray(
+                        (np.clip(rgb, 0, 1) * 255).astype(np.uint8),
+                        mode="RGB",
+                    )
+                    removal_time = time.time() - t1
+                    logger.success(
+                        f"Background remove - Time: {removal_time:.2f}s - OutputSize: {image_without_background.size} - InputSize: {image.size}"
+                    )
+                    return image_without_background
 
-                image_without_background = to_pil_image(output[:3])
+            # PIL.Image (H, W, C) C=3
+            rgb_image = image.convert("RGB")
+
+            # Tensor (C, H', W') in [0,1]
+            rgb_tensor = self.transforms(rgb_image).to(self.device)
+            rgba_tensor = self._remove_background_rgba(rgb_tensor)
+            image_without_background = to_pil_image(rgba_tensor[:3].clamp(0, 1))
 
             removal_time = time.time() - t1
             logger.success(f"Background remove - Time: {removal_time:.2f}s - OutputSize: {image_without_background.size} - InputSize: {image.size}")
@@ -111,52 +117,84 @@ class BackgroundRemovalService:
             logger.error(f"Error removing background: {e}")
             return image 
 
+    def remove_background_rgba(self, image: Image.Image, padding_factor: float | None = None) -> Image.Image:
+        """
+        Remove the background and return an RGBA cutout with a soft alpha matte.
+        """
+        self.ensure_ready()
+        rgb_image = image.convert("RGB")
+        rgb_tensor = self.transforms(rgb_image).to(self.device)  # (C,H,W) in [0,1]
+        rgba_tensor = self._remove_background_rgba(rgb_tensor, padding_factor=padding_factor)
+        return to_pil_image(rgba_tensor.clamp(0, 1))
+
     def _remove_background(self, image_tensor: torch.Tensor) -> torch.Tensor:
         """
-        Remove the background from the image.
+        Backwards-compatible method: returns a (4,H_out,W_out) tensor RGBA.
         """
-        # Normalize tensor value for background removal model, reshape for model batch processing (C=3, H, W) -> (1, C=3, H, W)
-        input_tensor = self.normalize(image_tensor).unsqueeze(0)
-                
-        with torch.no_grad():
-            # Get mask from model (1, 1, H, W)
-            preds = self.model(input_tensor)[-1].sigmoid()
-            # Reshape and quantize mask values: (1, 1, H, W) -> (1, H, W) -> (H, W)
-            mask = preds[0].squeeze().mul_(255).int().div(255).float()
+        return self._remove_background_rgba(image_tensor)
 
-        # Get bounding box indices
-        bbox_indices = torch.argwhere(mask > 0.8)
-        if len(bbox_indices) == 0:
-            crop_args = dict(top = 0, left = 0, height = mask.shape[1], width = mask.shape[0])
+    def _remove_background_rgba(self, image_tensor: torch.Tensor, padding_factor: float | None = None) -> torch.Tensor:
+        """
+        Core matting/cropping routine.
+        Input: image_tensor (C,H,W) in [0,1]
+        Output: (4,H_out,W_out) RGBA in [0,1]
+        """
+        self.ensure_ready()
+
+        input_tensor = self.normalize(image_tensor).unsqueeze(0)
+        with torch.no_grad():
+            preds = self.model(input_tensor)[-1].sigmoid()  # (1,1,H,W)
+            mask = preds[0, 0].float().clamp(0, 1)          # (H,W)
+
+        # BBox from a modest threshold (keeps thin regions better than 0.8)
+        thresh = 0.2
+        ys_xs = torch.argwhere(mask > thresh)  # (N,2) -> (y,x)
+        h, w = mask.shape
+
+        if ys_xs.numel() == 0:
+            top, left, bottom, right = 0, 0, h, w
         else:
-            h_min, h_max = torch.aminmax(bbox_indices[:, 1])
-            w_min, w_max = torch.aminmax(bbox_indices[:, 0])
-            width, height = w_max - w_min, h_max - h_min
-            center =  (h_max + h_min) / 2, (w_max + w_min) / 2
-            size = max(width, height)
-            padded_size_factor = 1 + self.padding_percentage
-            size = int(size * padded_size_factor)
-            top = int(center[1] - size // 2)
-            left = int(center[0] - size // 2)
-            bottom = int(center[1] + size // 2)
-            right = int(center[0] + size // 2)
+            y_min = int(torch.min(ys_xs[:, 0]).item())
+            y_max = int(torch.max(ys_xs[:, 0]).item())
+            x_min = int(torch.min(ys_xs[:, 1]).item())
+            x_max = int(torch.max(ys_xs[:, 1]).item())
+
+            cy = (y_min + y_max) / 2.0
+            cx = (x_min + x_max) / 2.0
+            box_h = max(1, y_max - y_min + 1)
+            box_w = max(1, x_max - x_min + 1)
+            size = float(max(box_h, box_w))
+
+            pad = 1.0 + float(self.padding_percentage)
+            if padding_factor is not None:
+                pad = float(padding_factor)
+            size *= pad
+
+            half = size / 2.0
+            top = int(round(cy - half))
+            bottom = int(round(cy + half))
+            left = int(round(cx - half))
+            right = int(round(cx + half))
 
             if self.limit_padding:
                 top = max(0, top)
                 left = max(0, left)
-                bottom = min(mask.shape[1], bottom)
-                right = min(mask.shape[0], right)
+                bottom = min(h, bottom)
+                right = min(w, right)
 
-            crop_args = dict(
-                top=top,
-                left=left,
-                height=bottom - top,
-                width=right - left
-            )
+        crop_args = dict(
+            top=top,
+            left=left,
+            height=max(1, bottom - top),
+            width=max(1, right - left),
+        )
 
-            mask = mask.unsqueeze(0)
-            # Concat mask with image and blacken the background: (C=3, H, W) | (1, H, W) -> (C=4, H, W)
-            tensor_rgba = torch.cat([image_tensor*mask, mask], dim=-3)
-            output = resized_crop(tensor_rgba, **crop_args, size = self.output_size, antialias=False)
-            return output
+        # Light feather to reduce jagged edges (cheap 5x5 avg blur)
+        mask_4d = mask.unsqueeze(0).unsqueeze(0)  # (1,1,H,W)
+        mask_blur = F.avg_pool2d(mask_4d, kernel_size=5, stride=1, padding=2).squeeze(0)  # (1,H,W)
+
+        # Premultiply RGB by alpha and pack RGBA
+        tensor_rgba = torch.cat([image_tensor * mask_blur, mask_blur], dim=0)  # (4,H,W)
+        output = resized_crop(tensor_rgba, **crop_args, size=self.output_size, antialias=False)
+        return output
 

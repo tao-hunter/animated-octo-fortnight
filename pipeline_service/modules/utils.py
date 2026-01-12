@@ -14,6 +14,40 @@ from schemas.trellis_schemas import TrellisResult
 
 from config import settings
 
+def composite_rgba_on_solid_background(image_rgba: Image.Image, bg_color: tuple[int, int, int]) -> Image.Image:
+    """
+    Composite an RGBA image onto a solid background color, returning RGB.
+    """
+    if image_rgba.mode != "RGBA":
+        image_rgba = image_rgba.convert("RGBA")
+    bg = Image.new("RGBA", image_rgba.size, color=(*bg_color, 255))
+    out = Image.alpha_composite(bg, image_rgba)
+    return out.convert("RGB")
+
+def images_to_strip(images: list[Image.Image]) -> Image.Image:
+    """
+    Concatenate images horizontally for debugging/return payloads.
+    """
+    if not images:
+        raise ValueError("images_to_strip: empty images")
+    imgs = [img.convert("RGB") for img in images]
+    h = max(i.height for i in imgs)
+    w = sum(i.width for i in imgs)
+    canvas = Image.new("RGB", (w, h), color=(0, 0, 0))
+    x = 0
+    for img in imgs:
+        canvas.paste(img, (x, 0))
+        x += img.width
+    return canvas
+
+def to_png_base64_any(image_or_images: Image.Image | list[Image.Image]) -> str:
+    """
+    Like `to_png_base64`, but supports lists by concatenating to a strip.
+    """
+    if isinstance(image_or_images, list):
+        return to_png_base64(images_to_strip(image_or_images))
+    return to_png_base64(image_or_images)
+
 def secure_randint(low: int, high: int) -> int:
     """ Return a random integer in [low, high] using os.urandom. """
     range_size = high - low + 1

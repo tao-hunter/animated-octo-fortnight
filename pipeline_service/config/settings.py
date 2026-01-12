@@ -51,6 +51,15 @@ class Settings(BaseSettings):
     output_image_size: tuple[int, int] = Field(default=(518, 518), env="OUTPUT_IMAGE_SIZE") # (height, width)
     padding_percentage: float = Field(default=0.2, env="PADDING_PERCENTAGE")
     limit_padding: bool = Field(default=True, env="LIMIT_PADDING")
+
+    # Object-only preprocessing
+    # Neutral background color used after segmentation (improves stability on cluttered photos)
+    object_bg_color: tuple[int, int, int] = Field(default=(128, 128, 128), env="OBJECT_BG_COLOR")
+    # Faster, identity-preserving "multi-view": multiple crops of the same segmented object
+    use_multicrop_views: bool = Field(default=True, env="USE_MULTICROP_VIEWS")
+    multicrop_padding_factors: tuple[float, float, float] = Field(default=(1.05, 1.20, 1.35), env="MULTICROP_PADDING_FACTORS")
+    # Optional (slow / may introduce identity drift). Keep off for 30s budget.
+    use_qwen_views: bool = Field(default=False, env="USE_QWEN_VIEWS")
     
     vllm_url: str = "http://localhost:8095/v1"
     vllm_api_key: str = "local"
